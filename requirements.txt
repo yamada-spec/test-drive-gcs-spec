@@ -1,1 +1,9 @@
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-httplib2>=0.2.0
+google-cloud-storage>=2.10.0
+html2text>=2020.1.16
 
+# Web サーバー用 (Cloud Run の起動に必要)
+Flask==3.0.0
+gunicorn==21.2.0
