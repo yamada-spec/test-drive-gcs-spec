@@ -92,16 +92,45 @@ def _list_children(service, parent_id: str) -> list[dict]:
 def _log_parent_children_names(
     service, parent_id: str, sought_folder_name: str
 ) -> None:
-    """名前一致のフォルダが見つからないとき、親フォルダ直下の名前をすべてログに出す。"""
-    items = _list_children(service, parent_id)
+    """
+    名前一致のフォルダが見つからないとき、親フォルダ直下のファイル・フォルダ名をすべてログに出す。
+    スペース差・権限・親 ID 取り違えの切り分け用。
+    """
+    s = sought_folder_name
     print(
-        f"[Drive] 親フォルダ {parent_id!r} 内にフォルダ {sought_folder_name!r} が見つかりません。"
-        f" 直下は {len(items)} 件です。",
+        "[Drive] ターゲットフォルダが見つかりません。"
+        f" 親フォルダID={parent_id!r} / 探している名前={s!r} (len={len(s)})",
+        file=sys.stderr,
+    )
+    try:
+        items = _list_children(service, parent_id)
+    except HttpError as e:
+        print(
+            "[Drive] 親の直下一覧を取得できませんでした。"
+            " 共有・権限不足の可能性があります。",
+            file=sys.stderr,
+        )
+        print(f"  HttpError: {e}", file=sys.stderr)
+        return
+
+    n = len(items)
+    print(
+        f"[Drive] 親直下の一覧: {n} 件"
+        + ("（0件→親ID誤り・共有なし・権限不足の可能性）" if n == 0 else ""),
         file=sys.stderr,
     )
     for item in sorted(items, key=lambda x: x["name"]):
+        nm = item["name"]
         label = "folder" if item["mimeType"] == MIME_FOLDER else "file"
-        print(f"  - {item['name']!r} ({label})", file=sys.stderr)
+        ws_hint = ""
+        if nm != s and nm.strip() == s.strip():
+            ws_hint = "  <<< strip すると探している名前と一致（前後に空白？）"
+        print(
+            f"  - {nm!r} | len={len(nm)} | {label}"
+            f" | 探す名前との完全一致={nm == s} | strip一致={nm.strip() == s.strip()}"
+            f"{ws_hint}",
+            file=sys.stderr,
+        )
 
 
 def _get_folder_id_by_name(service, parent_id: str, name: str) -> str | None:
