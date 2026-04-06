@@ -1,6 +1,8 @@
 """
 「6年テキストテスト」Drive フォルダから PDF のみを GCS に同期する（Cloud Run 用）。
 
+差分同期: GCS に既にあり、かつ Drive の modifiedTime が GCS の更新時刻以前ならダウンロード・アップロードをスキップ。
+
 Cloud Run: gunicorn が main:app を起動。リクエストで同期開始。/health は生存確認のみ。
 ローカル CLI: python main.py --sync
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+from datetime import datetime, timezone
 from typing import Iterator
 
 from google.api_core import exceptions as gcs_exceptions
@@ -74,7 +77,7 @@ def _list_children(service, parent_id: str) -> list[dict]:
             .list(
                 q=q,
                 spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType)",
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
                 pageToken=page_token,
                 pageSize=1000,
                 supportsAllDrives=True,
@@ -157,17 +160,27 @@ def _get_folder_id_by_name(service, parent_id: str, name: str) -> str | None:
     return files[0]["id"]
 
 
+def _parse_drive_modified_time(iso: str | None) -> datetime | None:
+    """Drive API の modifiedTime (RFC3339) を timezone 付き datetime に変換。"""
+    if not iso:
+        return None
+    s = iso[:-1] + "+00:00" if iso.endswith("Z") else iso
+    return datetime.fromisoformat(s)
+
+
 def _iter_files_recursive(
     service, folder_id: str, rel_prefix: str
-) -> Iterator[tuple[str, str, str]]:
+) -> Iterator[tuple[str, str, str, str | None]]:
+    """(相対パス, fileId, mimeType, modifiedTime or None)"""
     for item in _list_children(service, folder_id):
         name = item["name"]
         mid = item["mimeType"]
         iid = item["id"]
+        mod = item.get("modifiedTime")
         if mid == MIME_FOLDER:
             yield from _iter_files_recursive(service, iid, f"{rel_prefix}{name}/")
         else:
-            yield f"{rel_prefix}{name}", iid, mid
+            yield f"{rel_prefix}{name}", iid, mid, mod
 
 
 def _download_media(service, file_id: str) -> bytes:
@@ -197,9 +210,45 @@ def _upload_bytes(
     blob.upload_from_string(data, content_type=content_type)
 
 
+def _normalize_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _should_skip_upload_same_or_newer_gcs(
+    gcs_client: storage.Client,
+    bucket_name: str,
+    blob_name: str,
+    drive_modified: datetime | None,
+) -> bool:
+    """
+    GCS にオブジェクトがあり、Drive の最終更新が GCS オブジェクトの更新時刻以下なら True（アップロード不要）。
+
+    GCS 側はアップロード直後の時刻を表す ``updated``（無ければ ``time_created``）と比較する。
+    作成日時のみでは再アップロード後の比較が成立しないため、更新時刻を優先する。
+    Drive の modifiedTime が取れない場合は False（安全のためアップロードへ）。
+    """
+    bucket = gcs_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    try:
+        blob.reload()
+    except gcs_exceptions.NotFound:
+        return False
+    if drive_modified is None:
+        return False
+    gcs_dt = blob.updated or blob.time_created
+    if gcs_dt is None:
+        return False
+    d = _normalize_utc(drive_modified)
+    g = _normalize_utc(gcs_dt)
+    return d <= g
+
+
 def sync_drive_to_gcs(bucket_name: str, root_folder_id: str) -> list[str]:
     """
     ルート直下の「テキスト」「テスト」フォルダを探し、配下の PDF のみを GCS にアップロードする。
+    同名オブジェクトが GCS にあり Drive 側が更新されていなければスキップする。
     """
     creds = _credentials()
     service = _drive_service(creds)
@@ -219,11 +268,21 @@ def sync_drive_to_gcs(bucket_name: str, root_folder_id: str) -> list[str]:
             lines.append(msg)
             continue
 
-        for rel_path, file_id, mime in _iter_files_recursive(service, folder_id, ""):
+        for rel_path, file_id, mime, modified_iso in _iter_files_recursive(
+            service, folder_id, ""
+        ):
             if mime != MIME_PDF:
                 continue
             blob_name = _gcs_blob_name(gcs_prefix, rel_path)
+            drive_modified = _parse_drive_modified_time(modified_iso)
             try:
+                if _should_skip_upload_same_or_newer_gcs(
+                    gcs_client, bucket_name, blob_name, drive_modified
+                ):
+                    skip_msg = f"スキップしました：{rel_path}"
+                    print(skip_msg, flush=True)
+                    lines.append(skip_msg)
+                    continue
                 data = _download_media(service, file_id)
                 _upload_bytes(
                     gcs_client,
@@ -233,7 +292,7 @@ def sync_drive_to_gcs(bucket_name: str, root_folder_id: str) -> list[str]:
                     "application/pdf",
                 )
                 ok = f"OK  gs://{bucket_name}/{blob_name}"
-                print(ok)
+                print(ok, flush=True)
                 lines.append(ok)
             except (HttpError, gcs_exceptions.GoogleAPIError, OSError) as e:
                 err = f"NG  {gcs_prefix}/{rel_path}: {e}"
