@@ -1,3 +1,4 @@
+
 # 1. ベースイメージの指定 (Python 3.11のスリム版を使用)
 FROM python:3.11-slim
 
@@ -18,7 +19,6 @@ COPY . .
 # 6. Cloud Run がリクエストを受け付けるポート (デフォルトは8080)
 EXPOSE 8080
 
-# 7. アプリケーションを実行するコマンド
-# main.py を python で直接実行する場合の例です。
-# Flask や Gunicorn を使う場合は、コマンドを書き換える必要があります。
-CMD ["python", "main.py"]
+# 7. Cloud Run は環境変数 PORT（通常 8080）で待ち受ける。gunicorn で Flask アプリを起動する。
+# main.py 先頭で main() を実行しないこと（以前はここで exit(1) になりプローブ失敗していた）
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 8 --timeout 0 main:app"]
