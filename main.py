@@ -89,6 +89,21 @@ def _list_children(service, parent_id: str) -> list[dict]:
     return items
 
 
+def _log_parent_children_names(
+    service, parent_id: str, sought_folder_name: str
+) -> None:
+    """名前一致のフォルダが見つからないとき、親フォルダ直下の名前をすべてログに出す。"""
+    items = _list_children(service, parent_id)
+    print(
+        f"[Drive] 親フォルダ {parent_id!r} 内にフォルダ {sought_folder_name!r} が見つかりません。"
+        f" 直下は {len(items)} 件です。",
+        file=sys.stderr,
+    )
+    for item in sorted(items, key=lambda x: x["name"]):
+        label = "folder" if item["mimeType"] == MIME_FOLDER else "file"
+        print(f"  - {item['name']!r} ({label})", file=sys.stderr)
+
+
 def _get_folder_id_by_name(service, parent_id: str, name: str) -> str | None:
     esc = _drive_query_escape(name)
     q = (
@@ -108,6 +123,7 @@ def _get_folder_id_by_name(service, parent_id: str, name: str) -> str | None:
     )
     files = resp.get("files", [])
     if not files:
+        _log_parent_children_names(service, parent_id, name)
         return None
     return files[0]["id"]
 
